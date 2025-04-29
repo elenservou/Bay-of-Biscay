@@ -17,7 +17,7 @@ library(rnaturalearthdata)
 library(sf)
 library(sp)
 library(sdmTMB)
-
+j
 # Map
 world <- ne_countries(scale = "medium", returnclass = "sf")
 
