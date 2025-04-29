@@ -1,0 +1,442 @@
+---
+title: "data_exploration"
+format: html
+---
+
+### Load libraries and data
+
+```{r,include=F,echo=F}
+
+# Load packages
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(mapdata)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(sf)
+library(sp)
+library(sdmTMB)
+
+# Map
+world <- ne_countries(scale = "medium", returnclass = "sf")
+
+```
+
+```{r,warning=F}
+
+espece='Sp10m3'; cespece='Sardine'; ccolor='blue';maxvalue=200
+listyears=c(2000:2019,2021:2024)
+file.data='./DataEggs/Cufes_spring.txt'
+data.eggs=read.table(file=file.data,sep="\t",header=T)
+
+```
+
+We removed data at the north of 48°N
+
+```{r,warning=F}
+
+data.eggs<- data.eggs %>% filter(Lat < 48 & is.na(Sp10m3)==F) %>%
+  mutate(Year=as.factor(Year), time=as.integer(Year))
+data.eggs <- add_utm_columns(data.eggs, c("Long", "Lat"), ll_crs = 4326, units = "km")
+
+```
+
+### Prepare grid for prediction
+
+```{r,warning=F}
+
+projection_grid <- readRDS("./DataEggs/user_region.rds")
+projection_grid_UTM <- add_utm_columns(projection_grid, c("Lon", "Lat"), ll_crs = 4326, units = "km")
+plot(projection_grid_UTM$X,projection_grid_UTM$Y)
+
+```
+
+```{r,warning=F}
+
+grid_yrs <- replicate_df(projection_grid_UTM, c("Year"), as.factor(unique(data.eggs$Year))) %>%
+  mutate(time=as.integer(Year))
+
+```
+
+### Create the mesh
+
+```{r,warning=F}
+
+mesh <- make_mesh(data.eggs, xy_cols = c("X", "Y"), cutoff = 30)  # minimum distance between knots before a new mesh vertex is added
+plot(mesh)
+
+```
+
+## MODEL 1 () : Spatial model (non spatio-temporal term)
+
+### Fit the model
+
+```{r,warning=F}
+
+fit_m1 <- sdmTMB(
+  Sp10m3 ~ 0 + Year,
+  data = data.eggs,
+  mesh = mesh,
+  family = tweedie(link = "log"),
+  spatial = "on"
+)
+
+```
+
+### Results of the fit
+
+```{r,warning=F}
+fit_m1
+```
+
+```{r,warning=F}
+
+tidy(fit_m1, conf.int = TRUE)
+
+```
+
+```{r,warning=F}
+
+tidy(fit_m1, effects = "ran_pars", conf.int = TRUE)
+
+```
+
+### Diagnostics
+
+```{r,warning=F}
+
+sanity(fit_m1)
+
+```
+
+### Prediction
+
+```{r,warning=F}
+
+p_m1 <- predict(fit_m1, newdata = grid_yrs)
+
+```
+
+```{r,warning=F}
+
+plot_m1 <- ggplot(data=p_m1, aes(X, Y, fill = exp(est))) + 
+  geom_raster() + facet_wrap(vars(Year)) +
+  scale_fill_viridis_c(trans = "log")
+plot_m1
+
+```
+
+## MODEL 2 (m2) : Spatiotemporal model
+
+### Fit the model
+
+```{r,warning=F}
+
+fit_m2 <- sdmTMB(
+  Sp10m3 ~ 0 + Year,
+  data = data.eggs,
+  mesh = mesh,
+  family = tweedie(link = "log"),
+  spatial = "on",
+  spatiotemporal = "IID",
+  time = "time")
+
+```
+
+### Results of the fit
+
+```{r,warning=F}
+fit_m2
+```
+
+```{r,warning=F}
+
+tidy(fit_m2, conf.int = TRUE)
+
+```
+
+```{r,warning=F}
+
+tidy(fit_m2, effects = "ran_pars", conf.int = TRUE)
+
+```
+
+### Diagnostics
+
+```{r,warning=F}
+
+sanity(fit_m2)
+
+```
+
+### Prediction
+
+```{r,warning=F}
+
+p_m2 <- predict(fit_m2, newdata = grid_yrs)
+
+```
+
+```{r,warning=F}
+
+plot_m2 <- ggplot(data=p_m2, aes(X, Y, fill = exp(est))) + 
+  geom_raster() + facet_wrap(vars(Year)) +
+  scale_fill_viridis_c(trans = "log")
+plot_m2
+
+```
+
+## MODEL temp (Temp) : Model spatio-temporel de Covariables
+
+### Prepare covariable
+
+```{r,warning=F}
+
+data.temp=data.eggs[data.eggs$Tempsbe>=0 & data.eggs$Tempsbe<30 & !is.na(data.eggs$Tempsbe),]
+hist(data.temp$Tempsbe)
+```
+
+### Create the mesh
+
+```{r,warning=F}
+
+mesh <- make_mesh(data.temp, xy_cols = c("X", "Y"), cutoff = 30)
+plot(mesh)
+
+```
+
+### Fit the model
+
+```{r,warning=F}
+
+fit_temp <- sdmTMB(
+  Tempsbe ~ 0 + Year,
+  data = data.temp,
+  mesh = mesh,
+  family = gaussian(link = "identity"),
+  spatial = "on",
+  spatiotemporal='IID',
+  time='time'
+  )
+
+```
+
+### Results of the fit
+
+```{r,warning=F}
+fit_temp
+```
+
+```{r,warning=F}
+
+tidy(fit_temp, conf.int = TRUE)
+
+```
+
+```{r,warning=F}
+
+tidy(fit_temp, effects = "ran_pars", conf.int = TRUE)
+
+```
+
+### Diagnostics
+
+```{r,warning=F}
+
+sanity(fit_temp)
+
+```
+
+### Prediction
+
+```{r,warning=F}
+
+p_temp <- predict(fit_temp, newdata = grid_yrs)
+
+```
+
+```{r,warning=F}
+
+plot_temp <- ggplot(data=p_temp, aes(X, Y, fill = est)) + 
+  geom_raster() + facet_wrap(vars(Year)) +
+  scale_fill_viridis_c(trans = "identity")
+plot_temp
+
+```
+
+## MODEL prof (Prof) : Model spatio-temporel de Covariables
+
+### Prepare covariable
+
+```{r,warning=F}
+
+data.prof=data.eggs[data.eggs$Sonde>=0 & data.eggs$Sonde<5000 & !is.na(data.eggs$Sonde),]
+hist((data.prof$Sonde))
+```
+
+## 
+
+### Create the mesh
+
+```{r,warning=F}
+
+mesh <- make_mesh(data.prof, xy_cols = c("X", "Y"), cutoff = 30)
+plot(mesh)
+
+```
+
+### Fit the model
+
+```{r,warning=F}
+
+fit_prof <- sdmTMB(
+  Sonde ~ 0 + Year,
+  data = data.prof,
+  mesh = mesh,
+  family = gaussian(link = "log"),
+  spatial = "on",
+  spatiotemporal='IID',
+  time='time'
+  )
+
+```
+
+### Results of the fit
+
+```{r,warning=F}
+fit_temp
+```
+
+```{r,warning=F}
+
+tidy(fit_temp, conf.int = TRUE)
+
+```
+
+```{r,warning=F}
+
+tidy(fit_temp, effects = "ran_pars", conf.int = TRUE)
+
+```
+
+### Diagnostics
+
+```{r,warning=F}
+
+sanity(fit_temp)
+
+```
+
+### Prediction
+
+```{r,warning=F}
+
+p_prof <- predict(fit_prof, newdata = grid_yrs)
+
+```
+
+```{r,warning=F}
+
+plot_prof <- ggplot(data=p_prof, aes(X, Y, fill = exp(est))) + 
+  geom_raster() + facet_wrap(vars(Year)) +
+  scale_fill_viridis_c(trans = "log")
+plot_prof
+
+```
+
+## 
+
+## MODEL m3 (m3) : Model spatio-temporel Sp10m3 avec Covariables
+
+### Create the mesh
+
+```{r,warning=F}
+
+mesh <- make_mesh(data.temp, xy_cols = c("X", "Y"), cutoff = 30)
+plot(mesh)
+
+```
+
+### Fit the model
+
+```{r,warning=F}
+
+fit_m3 <- sdmTMB(
+  Sp10m3 ~ 0 + Year + s(Tempsbe),
+  data = data.temp,
+  mesh = mesh,
+  family = tweedie(link="log"),
+  spatial = "on",
+  spatiotemporal='IID',
+  time='time'
+  )
+
+```
+
+### Results of the fit
+
+```{r,warning=F}
+fit_m3
+```
+
+```{r,warning=F}
+
+tidy(fit_m3, conf.int = TRUE)
+
+```
+
+```{r,warning=F}
+
+tidy(fit_m3, effects = "ran_pars", conf.int = TRUE)
+
+```
+
+### Diagnostics
+
+```{r,warning=F}
+
+sanity(fit_m3)
+
+```
+
+### Prediction
+
+```{r,warning=F}
+p_temp = p_temp %>% rename(Tempsbe=est)
+p_m3 <- predict(fit_m3, newdata = p_temp)
+
+```
+
+```{r,warning=F}
+
+plot_m3 <- ggplot(data=p_m3, aes(X, Y, fill = exp(est))) + 
+  geom_raster() + facet_wrap(vars(Year)) +
+  scale_fill_viridis_c(trans = "log")
+plot_m3
+
+```
+
+### Visualize
+
+```{r,warning=F}
+
+nd <- data.frame(
+  Tempsbe = seq(min(data.temp$Tempsbe), max(data.temp$Tempsbe), length.out = 100
+  ),
+  Year = as.factor(2024),time=24 # a chosen year
+)
+
+p <- predict(fit_m3, newdata = nd, se_fit = TRUE, re_form = NA)
+
+ggplot(p, aes(Tempsbe, exp(est),
+  ymin = exp(est - 1.96 * est_se),
+  ymax = exp(est + 1.96 * est_se)
+)) +
+  geom_line() +
+  geom_ribbon(alpha = 0.4) +
+  scale_x_continuous() +
+  coord_cartesian(expand = F) +
+  labs(x = "Temp (°C)", y = "Density (Nb/10m3)")
+
+```

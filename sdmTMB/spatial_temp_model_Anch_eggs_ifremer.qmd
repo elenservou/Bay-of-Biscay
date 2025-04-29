@@ -1,0 +1,390 @@
+---
+title: "sdmTMB Anchovy eggs Bay of biscay "
+format:
+  html:
+    toc: true
+    toc-depth: 4
+    toc-float: true
+    code-fold: true         
+    code-summary: "Hide/Show "
+    code-tools:
+      toggle: true         
+---
+
+
+### Load libraries and data
+###### Anhcovy eggs (n eggs/10m~3~) at 5m depth, 3nmi x 12nmi
+```{r,include=F,echo=F}
+rm(list=ls())
+
+# Load packages
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(mapdata)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(sf)
+library(sp)
+library(sdmTMB)
+
+# Map
+world <- ne_countries(scale = "medium", returnclass = "sf")
+```
+
+```{r,warning=F}
+espece='Ee10m3'; cespece='Anchovy'; ccolor='blue';maxvalue=200
+listyears=c(2000:2019,2021:2024)
+file.data='DataEggs/Cufes_spring_ifremer.txt'
+data.eggs=read.table(file=file.data,sep="\t",header=T)
+```
+
+#####  A quick map of your row data
+```{r,warning=F}
+data.eggs_sf <- st_as_sf(data.eggs, coords = c("Long", "Lat"), crs = "WGS84")
+plot_eggs <- ggplot(data = data.eggs_sf) + 
+  geom_sf(aes(color = Ee10m3), alpha = 0.8, size = 1) +
+  facet_wrap(~ Year) +
+  scale_color_viridis_c(trans = "log", na.value = "grey80",  name = expression("Log(Eggs/10m³)\n grays are zero")) +
+ggtitle("Total Anchovy eggs")
+plot_eggs
+```
+
+#### We removed data at the north of 48°N
+```{r,warning=F}
+data.eggs<- data.eggs %>% filter(Lat < 48 & is.na(Sp10m3)==F) %>%
+  mutate(Year=as.factor(Year), time=as.integer(Year))
+data.eggs <- add_utm_columns(data.eggs, c("Long", "Lat"), ll_crs = 4326, units = "km")   #Project coordinates to Km
+```
+
+### A quick map of your final data
+```{r,warning=F}
+data.eggs_sf <- st_as_sf(data.eggs, coords = c("Long", "Lat"), crs = "WGS84")
+plot_eggs <- ggplot(data = data.eggs_sf) + 
+  geom_sf(aes(color = Ee10m3), alpha = 0.8, size = 0.8) +
+  facet_wrap(~ Year) +
+  scale_color_viridis_c(trans = "log", na.value = "grey80",   name = expression("Log(Eggs/10m³)\n grays are zero")) +
+ggtitle("Total Anchovy eggs")
+plot_eggs
+```
+
+### Prepare grid for prediction
+```{r,warning=F}
+projection_grid <- readRDS("./DataEggs/user_region.rds")
+projection_grid_UTM <- add_utm_columns(projection_grid, c("Lon", "Lat"), ll_crs = 4326, units = "km")
+plot(projection_grid_UTM$X,projection_grid_UTM$Y)
+
+```
+
+```{r,warning=F}
+grid_yrs <- replicate_df(projection_grid_UTM, c("Year"), as.factor(unique(data.eggs$Year))) %>%
+  mutate(time=as.integer(Year))
+```
+### Create the mesh
+
+In these kinds of models, the spatial (ω~s~) and the spatiotemporal (ε~s,t~) variations (and potentially any spatial varying coefficient) are modeled as Gaussian Random Fields (GRF), where the random effects describing the spatial patterns are assumed to be drawn from a multivariate normal distribution MVNormal (0,Σ). Estimating this covariance matrix (Σ) is computational demanding, so the SPDE approach is used to approximate the Gaussian random fields.
+
+For the SPDE approximation approach you need another grid called the **mesh** which is a triangulated mesh with Knots. These Knots are used to approximate the spatial variability in your data and because the number of Knots \<\< number of data points the computation of the covariance is easier. The Matern correlation is used as a covariance function to account for spatial autocorrelation.
+
+*Maybe more discussion in how you contract the mesh (ex. who many Knots you need)*
+
+So, so far we have three grids with different spatial resolution :
+
+-   The data grid (your sampling points, those data are used to estimate fixed parameres)
+
+-   The mesh (for the Gaussian Random Fields approximation)
+
+-   The prediction grid ( for predictions using your final model).
+
+    So the mesh is:
+
+```{r warning=FALSE}
+mesh <- make_mesh(data.eggs, xy_cols = c("X", "Y"), cutoff = 30)  # cutoff: minimum distance between knots before a new mesh vertex is added- units as in your dataset
+plot(mesh)                                                     
+```
+## MODEL 1 (m~1~) : Spatial model (non spatio-temporal term)
+
+The first model (m~1~) follows that formula:
+
+μ~s,t~= exp(β~t~+ ω~s~),
+
+μ~s,t~= log(y~s,t~ ),
+
+y~s,t~ \~ Tweedie (μ~s,t~ ,p, φ) , ω\~ MVNormal (0,Σ~ω~)
+
+where the modeled egg density (μ~s,t~) follows the Tweedie distribution with a log link function, as egg density is positive, continuous and contains zeros.
+
+y~s,t~ represents eggs density (no of eggs/10m^2^) at space (s) and time(t), μ is the mean density at time and space and p, φ represent power and dispersion parameters of the Tweedie distribution, respectively.
+
+β~t~ are the fixed effects for factor(Year), they represent the average temporal variation
+
+ω~s~ is the spatial random effect, drawn from a GRF with covarianvce matrix Σ~ω~ using Maretn correlation function. It represents the average spatial pattern (nich effect) and it also accounts for spatial variation that is not accounted for by our fixed effects. In other words, these deviations represent consistent biotic and abiotic factors that are affecting biomass density but are not accounted for in the model.
+
+### Fit the model
+
+```{r,warning=F}
+fit_m1 <- sdmTMB(
+  Ee10m3 ~ 0 + Year,
+  data = data.eggs,
+  mesh = mesh,
+  family = tweedie(link = "log"),
+  spatial = "on"
+)
+
+```
+
+### Results of the fit
+
+```{r,warning=F}
+fit_m1  
+```
+
+#### Confidence intervals of fixed effects
+
+```{r,warning=F}
+fix_effects<- tidy(fit_m1, conf.int = TRUE)
+fix_effects
+```
+
+#### Confidence intervals of random effect and variance parameters
+
+```{r,warning=F}
+random_effects<- tidy(fit_m1, effects = "ran_pars", conf.int = TRUE)
+random_effects
+```
+
+Other than the effect of the spatial random field you have: :
+
+-   Matérn range: the distance at witch you have no correlation - similar to the variogram range
+
+-   phi (φ) & tweedie_p (p): the dispersion parameter and the power of the Tweedie distribution, respectively.
+
+##### Plot the all the effects
+
+```{r,warning=F}
+ggplot() +
+  geom_point(data = fix_effects, aes(x = estimate, y = term, col = term)) + 
+  geom_errorbar(data = fix_effects, aes(y = term, xmin = conf.low, xmax = conf.high, color = term), width = 0.2) +  
+  geom_point(data = random_effects %>% filter(term == "sigma_O"), aes(x = estimate, y = term)) +  
+  geom_errorbar(data = random_effects %>% filter(term == "sigma_O"), aes(y = term, xmin = conf.low, xmax = conf.high), width = 0.2) +  
+  labs( title = expression("Mean and 95% confidence intervals of the fixed & random effects," ~ m[1]),       
+        subtitle = expression(mu[s~t] ~ "=" ~ exp(beta[t] + omega[s]))) +
+  theme_bw() +
+  theme(legend.position = "none")
+```
+
+You can see that the effect of spatial term is the most "important" one. Space is the more influential parameter in egg distribution in this model.
+
+### Diagnostics
+
+What do you check?
+
+Residuals?
+
+```{r,warning=F}
+sanity(fit_m1)
+```
+
+### Prediction
+
+You now perform a prediction in you prediction grid using the fitted model m~1~. When you visualize your prediction in a map you can visualize your final prediction your model (eg. the estimated number of eggs) or you can visualize separately each part of the decomposition (the effect of the fixed covariates and the effect of the random fields (ω~s~, ε~s,t~) and see what is going on.
+
+```{r,warning=F}
+#Predict in the prediction grid that has been created above
+p_m1 <- predict(fit_m1, newdata = grid_yrs)
+```
+
+#### Full (fixed and random effects) model m~1~ prediction
+
+```{r,warning=F}
+plot_m1 <- ggplot(data=p_m1, aes(X, Y, fill = exp(est))) + 
+  geom_raster() + facet_wrap(vars(Year)) +
+  scale_fill_viridis_c(trans = "log")+ 
+  ggtitle("Prediction (fixed effects +  random effects) based on full m1",
+subtitle = expression("The estimated density of eggs " * log(mu[st]) * ": " * mu[st] == exp(beta[t] + omega[s])))
+
+plot_m1
+```
+
+#### Fixed effect in the of prediction model m~1~
+
+```{r,warning=F}
+plot_m1 <- ggplot(data=p_m1, aes(X, Y, fill = exp(est_non_rf))) + 
+  geom_raster() + facet_wrap(vars(Year)) +
+  scale_fill_viridis_c(trans = "log")+ 
+  ggtitle("Prediction (fixed effects only) based on full m1",
+          subtitle = expression("The effect of time in the estimated variable " * (beta[t]) * ": " * mu[st] == exp(beta[t] + omega[s])))
+plot_m1
+```
+
+#### Random effect in the prediction of model m~1~
+
+Here spatial random effect only
+
+```{r,warning=F}
+plot_m1 <- ggplot(data=p_m1, aes(X, Y, fill = exp(omega_s))) + 
+  geom_raster() +
+  scale_fill_viridis_c(trans = "log")+ 
+  ggtitle("Prediction (random effects only) based on full m1",
+          subtitle = expression("The effect of space in the estimated variable " * (omega[s]) * ": " * mu[st] == exp(beta[t] + omega[s])))
+plot_m1
+```
+
+For the ω~s~ we have only one map because the spatial effect is stable across time. This is the mean spatial effect estimated from your data and it also represents the mean spatial distribution. If you want to see if or how the spatial effect changes in time then you need a spatiotemporal random effect (see m~2~).
+
+This spatial random effect represents variance in space (but consistence through time) coming from the data that are not accounted by the fixed effects. In this model compared to m~1~ the spatial random effect is less influential because a part of the variability is now explained by the spatiotemporal effect term.
+
+
+## MODEL 2 (m~2~) : Spatiotemporal model
+
+The 2^nd^ model (m~2~) follows that formula:
+
+μ~s,t~= exp(β~t~+ ω~s~ + ε~s,t~),
+
+μ~s,t~= log(y~s,t~ ),
+
+y~s,t~ \~ Tweedie (μ~s,t~ ,p, φ) , ω\~ MVNormal (0,Σ~ω~) , ε~t~ \~ MVNormal (0,Σ~t~)
+
+where the modeled egg density (μ~s,t~) follows the Tweedie distribution with a log link function, as egg density is positive, continuous and contains zeros.
+
+y~s,t~ represents eggs density (no of eggs/10m^2^) at space (s) and time(t), μ is the mean density at time and space and p, φ represent power and dispersion parameters of the Tweedie distribution, respectively.
+
+β~t~ are the fixed effects for factor(Year), they represent the average temporal variation
+
+ω~s~ is the spatial random effect, drawn from a GRF with covarianvce matrix Σ~ω~ using Maretn correlation function. It represents the average spatial pattern (nich effect) and it also accounts for spatial variation that is not accounted for by our fixed effects. In other words, these deviations represent consistent biotic and abiotic factors that are affecting biomass density but are not accounted for in the model.
+
+ε~s,t~ represents the spatiotemporal random effect, drawn from a GRF with covarianvce matrix Σ~ε~. They represents how the average spatial pattern change through year so they also for spatial variation that is not accounted for by our fixed effects and the spatial random effects. In other words, these deviations represent consistent biotic and abiotic factors that are affecting our study variable but are not accounted for in the model.
+
+In this model Spatiotemporal random fields are considered independent and identically distributed each single year (spatiotemporal = "IID") and Maretn correlation function to accounts for spatial autocorrelation.
+
+*Are there other options for spatiotemporal fields:*
+
+-   *"AR1": first-order autoregressive (each random filed is correlated to the one of the previous year )*
+
+-   *"RW": random walk (each random filed starts fro where it was last year plus a completely independent deviation)*
+
+### Fit the model
+
+```{r,warning=F}
+fit_m2 <- sdmTMB(
+  Ee10m3 ~ 0 + Year,
+  data = data.eggs,
+  mesh = mesh,
+  family = tweedie(link = "log"),
+  spatial = "on",
+  spatiotemporal = "IID",   
+  time = "time")
+
+```
+
+### Results of the fit
+
+```{r,warning=F}
+fit_m2
+```
+
+#### Confidence intervals of fixed effects
+
+```{r,warning=F}
+fix_effects<- tidy(fit_m2, conf.int = TRUE)
+fix_effects
+```
+
+#### Confidence intervals of random effects and variance parameters
+
+```{r,warning=F}
+random_effects<- tidy(fit_m2, effects = "ran_pars", conf.int = TRUE)
+random_effects
+```
+
+Other than the effect of the spatial random (sigma_O) and the spatiotemporal random field (sigma_E) field you have: :
+
+-   Matérn range: the distance at witch you have no correlation - similar to the variogram range
+
+-   phi (φ) & tweedie_p (p): the dispersion parameter and the power of the Tweedie distribution, respectively.
+
+##### Plot the all the effects
+
+```{r,warning=F}
+ggplot() +
+  geom_point(data = fix_effects, aes(x = estimate, y = term, col = term)) + 
+  geom_errorbar(data = fix_effects, aes(y = term, xmin = conf.low, xmax = conf.high, color = term), width = 0.2) +  
+  geom_point(data = random_effects %>% filter(term == c("sigma_O","sigma_E")), aes(x = estimate, y = term)) +  
+  geom_errorbar(data = random_effects %>% filter(term == c("sigma_O","sigma_E")), aes(y = term, xmin = conf.low, xmax = conf.high), width = 0.2) +  
+  labs( title = expression("Mean and 95% confidence intervals of the fixed & random effects," ~ m[2]),       
+        subtitle = expression(mu[s~t] ~ "=" ~ exp(beta[t] + omega[s] +epsilon[st]))) +
+  theme_bw() +
+  theme(legend.position = "none")
+```
+
+You can see that the effect of spatial term is steal the most "important" one. But a lot of is effect is now explained by the spatiotemporal effect.
+
+### Diagnostics
+
+```{r,warning=F}
+
+sanity(fit_m2)
+
+```
+
+### Prediction
+
+You can steel predict in the same grid as m~1~ as no more covariates have been added to the model.
+
+```{r,warning=F}
+p_m2 <- predict(fit_m2, newdata = grid_yrs)
+```
+
+#### Full (fixed and random effects) model m~2~ prediction
+
+```{r,warning=F}
+plot_m2 <- ggplot(data=p_m2, aes(X, Y, fill = exp(est))) + 
+  geom_raster() + facet_wrap(vars(Year)) +
+  scale_fill_viridis_c(trans = "log")+ 
+  ggtitle("Prediction (fixed effects +  random effects) based on full m2",
+subtitle = expression("The estimated density of eggs " * log(mu[st]) * ": " * mu[st] == exp(beta[t] + omega[s]+ epsilon[st])))
+plot_m2
+```
+
+#### Fixed effect in the prediction of model m~2~
+
+```{r,warning=F}
+plot_m2 <- ggplot(data=p_m2, aes(X, Y, fill = exp(est_non_rf))) + 
+  geom_raster() + facet_wrap(vars(Year)) +
+  scale_fill_viridis_c(trans = "log")+ 
+  ggtitle("Prediction (fixed effects only) based on full m2",
+          subtitle = expression("The effect of time in the estimated variable " * (beta[t]) * ": " * mu[st] == exp(beta[t] + omega[s]+ epsilon[st])))
+plot_m2
+```
+
+#### Random effects in the prediction of model m~2~
+
+Here spatial & spatiotemporal random effects
+
+##### Plot the spatial random effect
+
+```{r,warning=F}
+plot_m2 <- ggplot(data=p_m2, aes(X, Y, fill = exp(omega_s))) + 
+  geom_raster() +
+  scale_fill_viridis_c(trans = "log")+ 
+  ggtitle("Prediction (spatial random effect) based on full m2",
+          subtitle = expression("The effect of space in the estimated variable " * (omega[s]) * ": " * mu[st] == exp(beta[t] + omega[s] + epsilon[st])))
+plot_m2
+```
+
+##### Plot the spatotemporal random effect
+
+```{r,warning=F}
+plot_m2 <- ggplot(data=p_m2, aes(X, Y, fill = exp(epsilon_st))) + 
+  geom_raster() +
+  facet_wrap(vars(Year)) +
+  scale_fill_viridis_c(trans = "log")+ 
+  ggtitle("Prediction (spatiotemporal random effect) based on full m2",
+          subtitle = expression("The effect of space through time in the estimated variable " * (epsilon[st]) * ": " * mu[st] == exp(beta[t] + omega[s] + epsilon[st])))
+plot_m2
+```
+
+The spatiptempral random effect represent deviation from the fixed effect predictions and the spatial random effect deviations. These represent changes in the spatial paternal through time that are forced by parameters not accounted for in the model.
+
+
+ 
